@@ -50,11 +50,34 @@ public:
     TestHost(): Worker("test",0), m_io() {};
     ~TestHost() override { m_io.stop(); terminate(); }
     void start() { startWorking(); }
-    void doWork() override { m_io.run(); }
+    void doWork() override
+    { 
+//        m_emptyQueue = std::promise<void>(); 
+        m_io.run(); 
+//        m_emptyQueue.set_value();
+    }
     void doneWorking() override { m_io.reset(); m_io.poll(); m_io.reset(); }
-
+    void waitForIO()
+    {
+        cerr << "waiting for IO\n";
+        std::promise<void> finished;
+        // m_io.post([&finished]() {        cerr << "IO should be finished by now\n"; finished.set_value(); });
+        ba::deadline_timer t{m_io, boost::posix_time::milliseconds(0)};
+        //t.wait();
+        t.async_wait([&finished](boost::system::error_code const&) {        /*cerr << "IO should be finished by now\n"; */finished.set_value(); });
+        finished.get_future().wait();
+        cerr << "finished waiting for IO\n";
+    }
+/*    void waitForIO()
+    {
+        cerr << "waiting for IO\n";
+        m_emptyQueue.get_future().wait();
+        cerr << "finished waiting for IO\n";
+    }
+*/
 protected:
     ba::io_service m_io;
+    // std::promise<void> m_emptyQueue;
 };
 
 struct TestNodeTable: public NodeTable
@@ -151,6 +174,11 @@ struct TestNodeTable: public NodeTable
                 shared_ptr<NodeEntry> node(new NodeEntry(m_hostNodeID, testNode->first,
                     NodeIPEndpoint(ourIp, testNode->second, testNode->second)));
                 node->lastPongReceivedTime = RLPXDatagramFace::secondsSinceEpoch();
+                if (node->distance != _bucket + 1)
+                {
+                    ++testNode;
+                    continue;
+                }
                 m_allNodes[node->id] = node;
             }
             noteActiveNode(testNode->first, bi::udp::endpoint(ourIp, testNode->second));
@@ -622,6 +650,17 @@ BOOST_AUTO_TEST_CASE(pingTimeout)
     BOOST_CHECK(sentPing == nodeTable->m_sentPings.end());
 }
 
+struct TestNodeTableEventHandler : NodeTableEventHandler
+{
+    void processEvent(NodeID const& _n, NodeTableEventType const& _e) override
+    {
+        if (_e == NodeEntryScheduledForEviction)
+            scheduledForEviction.push(_n);
+    }
+
+    concurrent_queue<NodeID> scheduledForEviction;
+};
+
 BOOST_AUTO_TEST_CASE(evictionWithOldNodeAnswering)
 {
     TestNodeTableHost nodeTableHost(512);
@@ -636,7 +675,12 @@ BOOST_AUTO_TEST_CASE(evictionWithOldNodeAnswering)
     auto nodeEndpoint = NodeIPEndpoint{bi::address::from_string("127.0.0.1"), nodePort, nodePort};
     auto nodeKeyPair = KeyPair::create();
     auto nodeId = nodeKeyPair.pub();
+    cerr << "adding node " << nodeId << "\n";
     nodeTable->addNode(Node{nodeId, nodeEndpoint}, NodeTable::Known);
+
+    unique_ptr<TestNodeTableEventHandler> eventHandler;
+    concurrent_queue<NodeID>& evictEvents = eventHandler->scheduledForEviction;
+    nodeTable->setEventHandler(eventHandler.release());
 
     // add 15 nodes more to the same bucket
     BOOST_REQUIRE(nodeTable->m_allNodes.find(nodeId)->second->distance > 0);
@@ -660,7 +704,13 @@ BOOST_AUTO_TEST_CASE(evictionWithOldNodeAnswering)
     nodeTable->addNode(Node{newNodeId, newNodeEndpoint}, NodeTable::Known);
 
     // wait for PING to be sent out
-    this_thread::sleep_for(std::chrono::milliseconds(100));
+    //auto pingDataReceived = nodeSocketHost.packetsReceived.pop();
+//   cerr << DiscoveryDatagram::interpretUDP(bi::udp::endpoint{}, dev::ref(pingDataReceived))->typeName() << "\n";
+    //nodeTableHost.waitForIO();
+
+    //this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    evictEvents.pop();
 
     auto evicted = nodeTable->m_sentPings.find(nodeId);
     BOOST_REQUIRE(evicted != nodeTable->m_sentPings.end());
@@ -670,6 +720,8 @@ BOOST_AUTO_TEST_CASE(evictionWithOldNodeAnswering)
     auto pingDatagram =
         DiscoveryDatagram::interpretUDP(bi::udp::endpoint{}, dev::ref(pingDataReceived));
     auto ping = dynamic_cast<PingNode const&>(*pingDatagram);
+
+    //BOOST_REQUIRE_EQUAL(ping.destination, nodeId);
 
     // send valid PONG
     Pong pong(nodeTable->m_hostNodeEndpoint);

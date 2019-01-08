@@ -285,6 +285,7 @@ vector<shared_ptr<NodeEntry>> NodeTable::nearestNodeEntries(NodeID _target)
 
 void NodeTable::ping(NodeEntry const& _nodeEntry, boost::optional<NodeID> const& _replacementNodeID)
 {
+    //cerr << "scheduling ping " << _nodeEntry.address() << " \n";
     m_timers.schedule(0, [this, _nodeEntry, _replacementNodeID](
                              boost::system::error_code const& _ec) {
         if (_ec || m_timers.isStopped())
@@ -296,9 +297,14 @@ void NodeTable::ping(NodeEntry const& _nodeEntry, boost::optional<NodeID> const&
         p.ts = nextRequestExpirationTime();
         auto const pingHash = p.sign(m_secret);
         LOG(m_logger) << p.typeName() << " to " << _nodeEntry.id << "@" << p.destination;
+        cerr << "before send ping " << _nodeEntry.address() << " \n";
         m_socket->send(p);
+        cerr << "after send ping\n";
 
         m_sentPings[_nodeEntry.id] = {chrono::steady_clock::now(), pingHash, _replacementNodeID};
+        if (m_nodeEventHandler && _replacementNodeID)
+            m_nodeEventHandler->appendEvent(_nodeEntry.id, NodeEntryScheduledForEviction);
+        cerr << "pinged added to m_sentPings\n";
     });
 }
 
